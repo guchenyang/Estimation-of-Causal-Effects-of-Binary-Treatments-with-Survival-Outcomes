@@ -1,0 +1,384 @@
+## Causal inference with binary treatment and survival outcomes using Propensity score matching
+## Method 1: greedy nearest neighbor matching without replacement
+## Method 2: nearest neighbor caliper matching without replacement
+## Method 3: optimal full matching
+
+## Chenyang Gu
+## 10/21/2017
+
+
+library(MASS)
+library(mvtnorm)
+library(dplyr)
+library(MatchIt)
+library(optmatch)
+library(ggplot2)
+library(survival)
+
+
+## Real data analysis
+setwd("/Users/guchenyang/Dropbox/BART_Project")
+
+# data preprocessing
+dat0 = read.csv("dat1.csv")
+
+#some patients are treated at diagnosis
+rx0 = filter(dat0,days2trx==0) #548 patients
+dat0[dat0$days2trx==0,]$days2trx = .5
+#which variable has missing data
+colSums(is.na(dat0))
+dat = na.omit(dat0)
+
+dat[dat$CS_SITESPECIFIC_FACTOR_8<=6,]$CS_SITESPECIFIC_FACTOR_8 = 6
+dat[!dat$RACE %in% c(1,2),]$RACE = 3 #combine non-white & non-black race group
+dat[dat$SPANISH_HISPANIC_ORIGIN %in% c(1:8),]$SPANISH_HISPANIC_ORIGIN = 1
+dat = dat %>% mutate (tstage =ifelse(TNM_CLIN_T %in% c("3","3A","3B","4"),2,1))%>% select(-TNM_CLIN_T)
+
+names(dat) = c("age","race","spanish","insurance","income","education","deyo","dyear","psa","gs", "surgsite", "regdose", "boostdose","surgseq","hormone","fupmonth","id","trx","days2trx","death","totdose","tstage")
+
+dat = dat %>% mutate(dyearcat=ifelse(dyear %in% c(2004:2007), 1, ifelse(dyear %in% c(2008:2010),2,3)))
+
+#dim(dat)
+#[1] 42765    23
+
+#proportion of death in each trx group
+group_by(dat,trx) %>% summarise(n=n(), p = sum(death)/n)
+#Source: local data frame [3 x 3]
+#    trx     n          p
+#  (int) (int)      (dbl)
+#1     1 24688 0.02948801
+#2     2 15435 0.09420149
+#3     3  2642 0.06056018
+
+
+
+
+
+# Causal estimand: average treatment effect on the treated (ATT)
+# Group 1 (control) vs 3 (treatment)
+
+mydata = dat[dat$trx!=2,]
+
+mydata$treat = ifelse(mydata$trx==1, 0, 1)
+
+#logit.out = matchit(treat ~ psa + days2trx + age + factor(race) + spanish + factor(insurance) + factor(income) + factor(education) + factor(deyo) + factor(gs) + tstage + factor(dyearcat), data = mydata, method="nearest", distance = "logit", discard = "none")
+
+#gam.out = matchit(treat ~ s(psa) + s(days2trx) + s(age) + factor(race) + spanish + factor(insurance) + factor(income) + factor(education) + factor(deyo) + factor(gs) + tstage + factor(dyearcat), data = mydata, method="nearest", distance = "GAMlogit", discard = "none")
+
+race.f = factor(mydata$race)
+race.d = model.matrix(~race.f)
+race.c2 = race.d[,2]
+race.c3 = race.d[,3]
+
+insurance.f = factor(mydata$insurance)
+insurance.d = model.matrix(~insurance.f)
+insur.c2 = insurance.d[,2]
+insur.c3 = insurance.d[,3]
+insur.c4 = insurance.d[,4]
+insur.c5 = insurance.d[,5]
+insur.c6 = insurance.d[,6]
+
+income.f = factor(mydata$income)
+income.d = model.matrix(~income.f)
+income.c2 = income.d[,2]
+income.c3 = income.d[,3]
+income.c4 = income.d[,4]
+
+education.f = factor(mydata$education)
+education.d = model.matrix(~education.f)
+education.c2 = education.d[,2]
+education.c3 = education.d[,3]
+education.c4 = education.d[,4]
+
+deyo.f = factor(mydata$deyo)
+deyo.d = model.matrix(~deyo.f)
+deyo.c2 = deyo.d[,2]
+deyo.c3 = deyo.d[,3]
+
+gs.f = factor(mydata$gs)
+gs.d = model.matrix(~gs.f)
+gs.c2 = gs.d[,2]
+gs.c3 = gs.d[,3]
+gs.c4 = gs.d[,4]
+gs.c5 = gs.d[,5]
+
+dyearcat.f = factor(mydata$dyearcat)
+dyearcat.d = model.matrix(~dyearcat.f)
+dyearcat.c2 = dyearcat.d[,2]
+dyearcat.c3 = dyearcat.d[,3]
+
+tstage2 = mydata$tstage - 1
+
+fulldata = cbind(mydata$treat, mydata$psa, mydata$days2trx, mydata$age, race.c2, race.c3, mydata$spanish, insur.c2, insur.c3, insur.c4, insur.c5, insur.c6, income.c2, income.c3, income.c4, education.c2, education.c3, education.c4, deyo.c2, deyo.c3, gs.c2, gs.c3, gs.c4, gs.c5, tstage2, dyearcat.c2, dyearcat.c3)
+colnames(fulldata)[c(1,2,3,4,7)] = c("treat","psa","daystrx","age","spanish")
+fulldata = as.data.frame(fulldata)
+
+
+
+# greedy nearest neighbor matching
+m.out = matchit(treat ~ psa + daystrx + age + race.c2 + race.c3 + spanish + insur.c2 + insur.c3 + insur.c4 + insur.c5 + insur.c6 + income.c2 + income.c3 + income.c4 + education.c3 + education.c4 + deyo.c2 + deyo.c3 + gs.c2 + gs.c3 + gs.c4 + gs.c5 + tstage2 + dyearcat.c2 + dyearcat.c3, data = fulldata, method="nearest", distance="logit", discard="none")
+
+# extract matched dataset
+matchdata = match.data(m.out, group="all")
+
+# functions to calculate normalized differences for means (continuous) and prevalences (discrete)
+norm.diff.cont = function(x, treat) {
+    mu1 = mean(x[treat==1])
+    mu0 = mean(x[treat==0])
+    var1 = var(x[treat==1])
+    var0 = var(x[treat==0])
+    diff = (mu1 - mu0) / sqrt((var1 + var0)/2)
+    diff
+}
+
+norm.diff.disc = function(x, treat) {
+    p1 = mean(x[treat==1])
+    p0 = mean(x[treat==0])
+    var1 = p1*(1-p1)
+    var0 = p0*(1-p0)
+    diff = (p1 - p0) / sqrt((var1 + var0)/2)
+    diff
+}
+
+fulldata.cont.norm.diff = apply(fulldata[,c(2,3,4)], 2, norm.diff.cont, treat=fulldata[,1])
+fulldata.disc.norm.diff = apply(fulldata[,-c(1,2,3,4)], 2, norm.diff.disc, treat=fulldata[,1])
+
+matchdata.cont.norm.diff = apply(matchdata[,c(2,3,4)], 2, norm.diff.cont, treat=matchdata[,1])
+matchdata.disc.norm.diff = apply(matchdata[,-c(1,2,3,4,28,29)], 2, norm.diff.disc, treat=matchdata[,1])
+
+fulldata.norm.diff = c(fulldata.cont.norm.diff, fulldata.disc.norm.diff)
+matchdata.norm.diff = c(matchdata.cont.norm.diff, matchdata.disc.norm.diff)
+cbind(fulldata.norm.diff, matchdata.norm.diff)
+
+numvar = length(fulldata.norm.diff)
+
+# plot the covariate balance based on normalized differences
+par(mar=c(5,6,3,2))
+plot(fulldata.norm.diff, 1:numvar, cex=1, pch=16, ylim=c(1,numvar), ylab="", xlab="Normalized Difference", col="#0072B2", bty="l", yaxt="n") # blue circles
+points(matchdata.norm.diff, 1:numvar, cex=1, pch=17, col="#D55E00") # red triangles
+abline(v=0, lty=3, col="gray", lwd=1.5)
+axis(side=2, at=1:numvar, labels=colnames(fulldata)[-1], las=2)
+dev.off()
+
+# plot the propensity scores of treatment and control in the full sample
+ps.mod = glm(treat ~ psa + daystrx + age + race.c2 + race.c3 + spanish + insur.c2 + insur.c3 + insur.c4 + insur.c5 + insur.c6 + income.c2 + income.c3 + income.c4 + education.c3 + education.c4 + deyo.c2 + deyo.c3 + gs.c2 + gs.c3 + gs.c4 + gs.c5 + tstage2 + dyearcat.c2 + dyearcat.c3, family=binomial(), data = fulldata)
+ps.score = fitted(ps.mod)
+
+cbPalette = c("#0072B2", "#D55E00")
+trtgroup = ifelse(fulldata$treat==1, "Treatment", "Control")
+psdata = data.frame(ps=log(ps.score/(1-ps.score)), treat=trtgroup)
+ggplot(psdata, aes(x=ps, fill=treat)) + geom_histogram(binwidth=.5, aes(y = ..density..), alpha=0.7, position="identity") + theme_bw() + scale_fill_manual(values=cbPalette) + scale_colour_manual(values=cbPalette) + theme(legend.position="none") + xlab("Linearized Propensity Score")
+
+# plot the propensity scores of treatment and control in the matched sample
+match.idx = as.numeric(rownames(matchdata))
+ps.score2 = ps.score[match.idx]
+trtgroup2 = trtgroup[match.idx]
+psdata2 = data.frame(ps=log(ps.score2/(1-ps.score2)), treat=trtgroup2)
+ggplot(psdata2, aes(x=ps, fill=treat)) + geom_histogram(binwidth=.5, aes(y = ..density..), alpha=0.7, position="identity") + theme_bw() + scale_fill_manual(values=cbPalette) + scale_colour_manual(values=cbPalette) + theme(legend.position="none") + xlab("Linearized Propensity Score")
+
+# boxplot
+ggplot(psdata, aes(x=treat, y=ps, fill=treat)) + geom_boxplot() + guides(fill=FALSE) + theme_bw() + ylab("Linearized Propensity Score") + xlab("")
+
+ggplot(psdata2, aes(x=treat, y=ps, fill=treat)) + geom_boxplot() + guides(fill=FALSE) + theme_bw() + ylab("Linearized Propensity Score") + xlab("")
+
+
+# survival analysis using matched sample
+# outcome
+death = mydata$death
+death.match = death[match.idx]
+
+y = mydata$fupmonth
+y.match = y[match.idx]
+
+# treated and control indices in the matched sample
+trt.idx = as.numeric(rownames(m.out$match.matrix))
+con.idx = as.numeric(m.out$match.matrix)
+clusterid = rep(1:length(trt.idx), times=2)
+trt.level = c(rep(1, times=length(trt.idx)), rep(0, times=length(trt.idx)))
+
+yy = c(y[trt.idx], y[con.idx])
+dd = c(death[trt.idx], death[con.idx])
+
+# robust variance estimation
+cox.mod = coxph(Surv(yy, dd) ~ trt.level + cluster(clusterid))
+#            coef exp(coef) se(coef) robust se    z Pr(>|z|)
+#trt.level 0.3745    1.4542   0.1246    0.1244 3.01  0.00262 **
+#          exp(coef) exp(-coef) lower .95 upper .95
+#trt.level     1.454     0.6877     1.139     1.856
+#Concordance= 0.555  (se = 0.017 )
+#Rsquare= 0.002   (max possible= 0.539 )
+#Likelihood ratio test= 9.19  on 1 df,   p=0.002427
+#Wald test            = 9.06  on 1 df,   p=0.002617
+#Score (logrank) test = 9.13  on 1 df,   p=0.002513,   Robust = 9.18  p=0.002453
+
+
+
+
+# nearest neighbor caliper matching
+caliper.out = matchit(treat ~ psa + daystrx + age + race.c2 + race.c3 + spanish + insur.c2 + insur.c3 + insur.c4 + insur.c5 + insur.c6 + income.c2 + income.c3 + income.c4 + education.c3 + education.c4 + deyo.c2 + deyo.c3 + gs.c2 + gs.c3 + gs.c4 + gs.c5 + tstage2 + dyearcat.c2 + dyearcat.c3, data = fulldata, method="nearest", distance="logit", discard="none", caliper=0.2)
+#          Control Treated
+#All         24688    2642
+#Matched      2638    2638
+#Unmatched   22050       4
+#Discarded       0       0
+
+# extract matched dataset
+matchdata = match.data(caliper.out, group="all")
+
+# calculate normalized differences
+matchdata.cont.norm.diff = apply(matchdata[,c(2,3,4)], 2, norm.diff.cont, treat=matchdata[,1])
+matchdata.disc.norm.diff = apply(matchdata[,-c(1,2,3,4,28,29)], 2, norm.diff.disc, treat=matchdata[,1])
+matchdata.norm.diff = c(matchdata.cont.norm.diff, matchdata.disc.norm.diff)
+cbind(fulldata.norm.diff, matchdata.norm.diff)
+
+# plot the covariate balance based on normalized differences
+numvar = length(fulldata.norm.diff)
+par(mar=c(5,6,3,2))
+plot(fulldata.norm.diff, 1:numvar, cex=1, pch=16, ylim=c(1,numvar), ylab="", xlab="Normalized Difference", col="#0072B2", bty="l", yaxt="n") # blue circles
+points(matchdata.norm.diff, 1:numvar, cex=1, pch=17, col="#D55E00") # red triangles
+abline(v=0, lty=3, col="gray", lwd=1.5)
+axis(side=2, at=1:numvar, labels=colnames(fulldata)[-1], las=2)
+dev.off()
+
+# survival analysis using matched sample
+# outcome
+death = mydata$death
+y = mydata$fupmonth
+
+# treated and control indices in the matched sample
+match.idx = as.numeric(rownames(matchdata))
+match.trt.idx = match.idx[matchdata$treat==1]
+match.con.idx = match.idx[matchdata$treat==0]
+
+trt.idx = as.numeric(rownames(caliper.out$match.matrix))
+con.idx = as.numeric(caliper.out$match.matrix)
+
+sel.idx = trt.idx %in% match.trt.idx
+trt.idx2 = trt.idx[sel.idx]
+con.idx2 = con.idx[sel.idx]
+
+clusterid = rep(1:length(trt.idx2), times=2)
+trt.level = c(rep(1, times=length(trt.idx2)), rep(0, times=length(trt.idx2)))
+
+yy = c(y[trt.idx2], y[con.idx2])
+dd = c(death[trt.idx2], death[con.idx2])
+
+# robust variance estimation
+cox.mod = coxph(Surv(yy, dd) ~ trt.level + cluster(clusterid))
+#            coef exp(coef) se(coef) robust se     z Pr(>|z|)
+#trt.level 0.5089    1.6634   0.1314    0.1308 3.891 9.98e-05 ***
+#          exp(coef) exp(-coef) lower .95 upper .95
+#trt.level     1.663     0.6012     1.287     2.149
+#Concordance= 0.568  (se = 0.018 )
+#Rsquare= 0.003   (max possible= 0.518 )
+#Likelihood ratio test= 15.56  on 1 df,   p=7.999e-05
+#Wald test            = 15.14  on 1 df,   p=9.979e-05
+#Score (logrank) test = 15.33  on 1 df,   p=9.045e-05,   Robust = 15.6  p=7.84e-05
+
+
+
+# full matching
+# propensity score model
+ps.mod = glm(treat ~ psa + daystrx + age + race.c2 + race.c3 + spanish + insur.c2 + insur.c3 + insur.c4 + insur.c5 + insur.c6 + income.c2 + income.c3 + income.c4 + education.c3 + education.c4 + deyo.c2 + deyo.c3 + gs.c2 + gs.c3 + gs.c4 + gs.c5 + tstage2 + dyearcat.c2 + dyearcat.c3, family=binomial, data=fulldata)
+
+# overlap on fitted propensity scores
+boxplot(ps.mod)
+
+# distance matrix based on propensity scores
+psm.dist = match_on(ps.mod, data=fulldata)
+
+# optimmal full matching
+ps.pm = fullmatch(psm.dist, data=fulldata)
+
+# optimal full matching with a caliper
+# (disallow matching between units which differ by more than 2 standard deviations)
+ps.pm2 = fullmatch(psm.dist + caliper(psm.dist,2), data=fulldata)
+
+
+
+
+
+
+
+# Causal estimand: average treatment effect on the treated (ATT)
+# Group 1 (control) vs 2 (treatment)
+mydata = dat[dat$trx!=3,]
+mydata$treat = ifelse(mydata$trx==1, 0, 1)
+
+race.f = factor(mydata$race)
+race.d = model.matrix(~race.f)
+race.c2 = race.d[,2]
+race.c3 = race.d[,3]
+
+insurance.f = factor(mydata$insurance)
+insurance.d = model.matrix(~insurance.f)
+insur.c2 = insurance.d[,2]
+insur.c3 = insurance.d[,3]
+insur.c4 = insurance.d[,4]
+insur.c5 = insurance.d[,5]
+insur.c6 = insurance.d[,6]
+
+income.f = factor(mydata$income)
+income.d = model.matrix(~income.f)
+income.c2 = income.d[,2]
+income.c3 = income.d[,3]
+income.c4 = income.d[,4]
+
+education.f = factor(mydata$education)
+education.d = model.matrix(~education.f)
+education.c2 = education.d[,2]
+education.c3 = education.d[,3]
+education.c4 = education.d[,4]
+
+deyo.f = factor(mydata$deyo)
+deyo.d = model.matrix(~deyo.f)
+deyo.c2 = deyo.d[,2]
+deyo.c3 = deyo.d[,3]
+
+gs.f = factor(mydata$gs)
+gs.d = model.matrix(~gs.f)
+gs.c2 = gs.d[,2]
+gs.c3 = gs.d[,3]
+gs.c4 = gs.d[,4]
+gs.c5 = gs.d[,5]
+
+dyearcat.f = factor(mydata$dyearcat)
+dyearcat.d = model.matrix(~dyearcat.f)
+dyearcat.c2 = dyearcat.d[,2]
+dyearcat.c3 = dyearcat.d[,3]
+
+tstage2 = mydata$tstage - 1
+
+fulldata = cbind(mydata$treat, mydata$psa, mydata$days2trx, mydata$age, race.c2, race.c3, mydata$spanish, insur.c2, insur.c3, insur.c4, insur.c5, insur.c6, income.c2, income.c3, income.c4, education.c2, education.c3, education.c4, deyo.c2, deyo.c3, gs.c2, gs.c3, gs.c4, gs.c5, tstage2, dyearcat.c2, dyearcat.c3)
+colnames(fulldata)[c(1,2,3,4,7)] = c("treat","psa","daystrx","age","spanish")
+fulldata = as.data.frame(fulldata)
+
+
+
+
+
+# greedy nearest neighbor matching
+m.out = matchit(treat ~ psa + daystrx + age + race.c2 + race.c3 + spanish + insur.c2 + insur.c3 + insur.c4 + insur.c5 + insur.c6 + income.c2 + income.c3 + income.c4 + education.c3 + education.c4 + deyo.c2 + deyo.c3 + gs.c2 + gs.c3 + gs.c4 + gs.c5 + tstage2 + dyearcat.c2 + dyearcat.c3, data = fulldata, method="nearest", distance="logit", discard="none")
+
+# extract matched dataset
+matchdata = match.data(m.out, group="all")
+
+# calculate normalized differences
+fulldata.cont.norm.diff = apply(fulldata[,c(2,3,4)], 2, norm.diff.cont, treat=fulldata[,1])
+fulldata.disc.norm.diff = apply(fulldata[,-c(1,2,3,4)], 2, norm.diff.disc, treat=fulldata[,1])
+
+matchdata.cont.norm.diff = apply(matchdata[,c(2,3,4)], 2, norm.diff.cont, treat=matchdata[,1])
+matchdata.disc.norm.diff = apply(matchdata[,-c(1,2,3,4,28,29)], 2, norm.diff.disc, treat=matchdata[,1])
+
+fulldata.norm.diff = c(fulldata.cont.norm.diff, fulldata.disc.norm.diff)
+matchdata.norm.diff = c(matchdata.cont.norm.diff, matchdata.disc.norm.diff)
+cbind(fulldata.norm.diff, matchdata.norm.diff)
+
+# plot the covariate balance based on normalized differences
+par(mar=c(5,6,3,2))
+numvar = length(fulldata.norm.diff)
+plot(fulldata.norm.diff, 1:numvar, cex=1, pch=16, ylim=c(1,numvar), ylab="", xlab="Normalized Difference", col="#0072B2", bty="l", yaxt="n") # blue circles
+points(matchdata.norm.diff, 1:numvar, cex=1, pch=17, col="#D55E00") # red triangles
+abline(v=0, lty=3, col="gray", lwd=1.5)
+axis(side=2, at=1:numvar, labels=colnames(fulldata)[-1], las=2)
+dev.off()
